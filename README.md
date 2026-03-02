@@ -16,10 +16,15 @@
 
 <p align="center">
   <img src="https://img.shields.io/badge/build-passing-brightgreen?style=flat-square" alt="build" />
-  <img src="https://img.shields.io/badge/tests-76_passing-brightgreen?style=flat-square" alt="tests" />
+  <img src="https://img.shields.io/badge/tests-91_passing-brightgreen?style=flat-square" alt="tests" />
   <img src="https://img.shields.io/badge/license-MIT-blue?style=flat-square" alt="license" />
   <img src="https://img.shields.io/badge/rust-2021_edition-orange?style=flat-square" alt="rust" />
 </p>
+
+---
+
+> **🚧 Status: Active Development**
+> Telos is under rapid, active development. APIs, CLI interfaces, and storage formats may change between versions. We are currently running real-agent experiments to validate the core hypothesis — see [`docs/experiments/`](docs/experiments/) for iteration records and findings.
 
 ---
 
@@ -392,13 +397,14 @@ All objects are stored in a **content-addressable database**:
 cargo test
 ```
 
-**76 tests** across 3 crates:
+**91 tests** across 4 crates:
 
 | Crate | Tests | Coverage |
 |-------|-------|----------|
 | telos-core | 20 unit | Object serialization, round-trips, hashing |
-| telos-store | 25 unit | ODB, refs, indexes, queries, repository |
-| telos-cli | 31 integration | Full CLI workflows, all commands |
+| telos-store | 34 unit | ODB, refs, indexes, queries, repository, integrity validation |
+| telos-cli | 33 integration | Full CLI workflows, changeset commands |
+| telos-experiment | 4 unit | Scenario loading, prompt rendering |
 
 ---
 
