@@ -16,7 +16,7 @@
 
 <p align="center">
   <img src="https://img.shields.io/badge/build-passing-brightgreen?style=flat-square" alt="build" />
-  <img src="https://img.shields.io/badge/tests-91_passing-brightgreen?style=flat-square" alt="tests" />
+  <img src="https://img.shields.io/badge/tests-102_passing-brightgreen?style=flat-square" alt="tests" />
   <img src="https://img.shields.io/badge/license-MIT-blue?style=flat-square" alt="license" />
   <img src="https://img.shields.io/badge/rust-2021_edition-orange?style=flat-square" alt="rust" />
 </p>
@@ -209,6 +209,7 @@ erDiagram
                     │  init · intent · decide · log · show · query     │
                     │  context · stream · constraint · supersede       │
                     │  deprecate · bind · check · agent-log · reindex  │
+                    │  impact · graph · coverage · timeline · sync     │
                     ├──────────────────────────────────────────────────┤
                     │                   telos-store                     │
                     │  ObjectDatabase · RefStore · IndexStore           │
@@ -313,6 +314,101 @@ erDiagram
 </details>
 
 <details>
+<summary><strong>Visualization & governance</strong></summary>
+
+| Command | Synopsis | Description |
+|---------|----------|-------------|
+| `impact` | `telos impact <path> [--commit <sha>] [--json]` | Show constraints, intents, and decisions affecting a file, directory, or commit |
+| `graph` | `telos graph [--impact <area>] [--id <id>] [--depth <n>] [--json]` | Visualize intent → constraint → code relationship DAG |
+| `coverage` | `telos coverage [--dir <path>] [--json]` | Constraint coverage heatmap across source files |
+| `timeline` | `telos timeline [--impact <area>] [--json]` | Constraint lifecycle timeline (created, superseded, deprecated) |
+
+**Example: `telos impact`**
+
+```
+Impact: src/auth/middleware.rs
+──────────────────────────────
+
+Constraints (2):
+  [Must]   ● "Default role must be Member, never Admin"
+             constraint 21c8ebb · bound to validate_token()
+  [Should] ● "Auth middleware latency < 5ms"
+             constraint 3051473 · bound to file
+
+Intents (1):
+  intent f633b9f "Enforce RBAC through JWT validation"
+  └─ 1 decision recorded
+```
+
+**Example: `telos graph`**
+
+```
+Intent f633b9f "Enforce RBAC through JWT validation"
+│ dev@example.com · 2026-03-02 · impacts: auth, security
+│
+├─ [Must]   ● constraint 21c8ebb
+│  "Default role must be Member, never Admin"
+│  └─ src/auth/middleware.rs :: validate_token
+│
+├─ [Must]   ● constraint 14f4d5e
+│  "Token expiry must be <= 1 hour"
+│  └─ src/auth/config.rs :: token_lifetime
+│
+└─ decision fe4be05
+   Q: What should the default role be?
+   A: Member
+   Rejected: Admin, Viewer
+```
+
+**Example: `telos coverage`**
+
+```
+Constraint Coverage
+───────────────────
+
+src/
+├─ auth/
+│  ├─ middleware.rs ████████ 2 constraints
+│  ├─ config.rs     ████░░░░ 1 constraint
+│  └─ role.rs       ░░░░░░░░ -
+└─ payments/
+   ├─ handler.rs    ░░░░░░░░ -
+   └─ ledger.rs     ░░░░░░░░ -
+
+Summary: 3 constraints across 2/5 files (40%)
+         3 files uncovered
+```
+
+**Example: `telos timeline`**
+
+```
+Constraint Timeline
+───────────────────
+
+14f4d5e [Must]   "Token expiry must be <= 1 hour"
+  ● Created     2026-02-10  dev@example.com
+    (active 20d)
+
+fe773c7 [Should] "Auth middleware latency < 5ms"
+  ● Created     2026-02-12  dev@example.com
+  ▲ Superseded  2026-02-25  dev@example.com
+    └─ by 3410d1a
+
+Active: 3  Superseded: 1  Deprecated: 0
+```
+
+</details>
+
+<details>
+<summary><strong>Agent sync</strong></summary>
+
+| Command | Synopsis | Description |
+|---------|----------|-------------|
+| `sync` | `telos sync --target claude\|codex\|generic [--only-must] [--all] [--dry-run] [--remove]` | Export active constraints to agent memory files (CLAUDE.md, etc.) |
+
+</details>
+
+<details>
 <summary><strong>Maintenance</strong></summary>
 
 | Command | Synopsis | Description |
@@ -397,13 +493,13 @@ All objects are stored in a **content-addressable database**:
 cargo test
 ```
 
-**91 tests** across 4 crates:
+**102 tests** across 4 crates:
 
 | Crate | Tests | Coverage |
 |-------|-------|----------|
 | telos-core | 20 unit | Object serialization, round-trips, hashing |
 | telos-store | 34 unit | ODB, refs, indexes, queries, repository, integrity validation |
-| telos-cli | 33 integration | Full CLI workflows, changeset commands |
+| telos-cli | 6 unit + 38 integration | Sync logic, full CLI workflows, changeset commands |
 | telos-experiment | 4 unit | Scenario loading, prompt rendering |
 
 ---
@@ -414,6 +510,7 @@ cargo test
 |-------|--------|-------|
 | **Phase 1** | Complete | Core data model, content-addressable storage, CLI, query system, `--json`, `context` |
 | **Phase 2** | Complete | Constraint lifecycle, code bindings, agent operation logging, IndexStore, code-aware queries |
+| **Phase 2.5** | Complete | Terminal visualization (`impact`, `graph`, `coverage`, `timeline`), agent sync (`sync`) |
 | **Phase 3** | Planned | Agent memory SDK (`telos-agent`), semantic search, embedding store |
 | **Phase 4** | Planned | Deep Git integration (hooks, commit metadata), code graph (`telos-codegraph` + tree-sitter) |
 

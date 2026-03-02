@@ -1,4 +1,5 @@
 mod commands;
+mod render;
 
 use clap::{Parser, Subcommand};
 
@@ -234,6 +235,45 @@ enum Commands {
         #[arg(long)]
         remove: bool,
     },
+
+    /// Analyze change impact for a file, directory, or commit
+    Impact {
+        /// File or directory path
+        path: Option<String>,
+
+        /// Git commit SHA
+        #[arg(long)]
+        commit: Option<String>,
+    },
+
+    /// Show intent-constraint-code relationship graph
+    Graph {
+        /// Filter by impact area
+        #[arg(long)]
+        impact: Option<String>,
+
+        /// Show single intent by ID prefix
+        #[arg(long)]
+        id: Option<String>,
+
+        /// Limit nesting depth
+        #[arg(long)]
+        depth: Option<usize>,
+    },
+
+    /// Show constraint coverage across source files
+    Coverage {
+        /// Limit to specific directory
+        #[arg(long)]
+        dir: Option<String>,
+    },
+
+    /// Show constraint lifecycle timeline
+    Timeline {
+        /// Filter by impact area
+        #[arg(long)]
+        impact: Option<String>,
+    },
 }
 
 #[derive(Subcommand)]
@@ -433,6 +473,12 @@ fn main() {
             dry_run,
             remove,
         } => commands::sync::run(target, output, only_must, all, dry_run, remove),
+        Commands::Impact { path, commit } => commands::impact::run(path, commit, cli.json),
+        Commands::Graph { impact, id, depth } => {
+            commands::graph::run(impact, id, depth, cli.json)
+        }
+        Commands::Coverage { dir } => commands::coverage::run(dir, cli.json),
+        Commands::Timeline { impact } => commands::timeline::run(impact, cli.json),
     };
 
     if let Err(e) = result {
