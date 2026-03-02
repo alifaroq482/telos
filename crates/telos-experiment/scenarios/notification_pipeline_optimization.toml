@@ -1,0 +1,580 @@
+[scenario]
+name = "notification_pipeline_optimization"
+category = "true_positive"
+description = "Notification pipeline performance optimization that breaks FIFO ordering, introduces false-positive dedup, and can lose notifications entirely"
+
+[diff]
+commit_message = "Optimize notification pipeline: priority queue, concurrent dispatch, bloom filter dedup"
+content = """
+diff --git a/src/notifications/queue.rs b/src/notifications/queue.rs
+index 5a6b7c8..9d0e1f2 100644
+--- a/src/notifications/queue.rs
++++ b/src/notifications/queue.rs
+@@ -1,43 +1,89 @@
+-use std::collections::VecDeque;
++use std::collections::BTreeMap;
++use tracing::{info, debug};
+
+-/// A simple FIFO notification queue.
+-/// Notifications are dequeued in the order they were enqueued,
+-/// preserving insertion order regardless of priority.
++/// A priority-based notification queue.
++///
++/// Notifications are organized by priority level and dispatched
++/// highest-priority first. This replaces the previous FIFO queue
++/// for improved throughput on high-priority notifications.
++///
++/// # Priority Levels
++/// - 0: Critical (system alerts, security events)
++/// - 1: High (user-facing actions, payment confirmations)
++/// - 2: Normal (general updates, status changes)
++/// - 3: Low (digests, analytics, batch reports)
+ pub struct NotificationQueue {
+-    queue: VecDeque<Notification>,
++    /// Priority buckets: lower number = higher priority
++    buckets: BTreeMap<u8, Vec<Notification>>,
++    total_count: usize,
+ }
+
+-#[derive(Debug, Clone)]
++#[derive(Debug, Clone, PartialEq)]
+ pub struct Notification {
+     pub id: String,
+     pub recipient: String,
+     pub channel: String, // "email", "push", "sms"
+     pub subject: String,
+     pub body: String,
+-    pub priority: u8, // 0=critical, 1=high, 2=normal, 3=low
++    pub priority: u8,
++    pub created_at: u64,
+ }
+
+ impl NotificationQueue {
+     pub fn new() -> Self {
+         Self {
+-            queue: VecDeque::new(),
++            buckets: BTreeMap::new(),
++            total_count: 0,
+         }
+     }
+
++    /// Enqueue a notification into its priority bucket.
+     pub fn enqueue(&mut self, notification: Notification) {
+-        self.queue.push_back(notification);
++        debug!(
++            id = %notification.id,
++            priority = notification.priority,
++            recipient = %notification.recipient,
++            "Notification enqueued"
++        );
++        self.buckets
++            .entry(notification.priority)
++            .or_insert_with(Vec::new)
++            .push(notification);
++        self.total_count += 1;
+     }
+
+-    pub fn dequeue(&mut self) -> Option<Notification> {
+-        self.queue.pop_front()
++    /// Drain a batch of notifications, highest priority first.
++    ///
++    /// Returns up to `batch_size` notifications, pulling from the
++    /// highest-priority (lowest number) bucket first, then moving
++    /// to lower priorities until the batch is full.
++    pub fn drain_batch(&mut self, batch_size: usize) -> Vec<Notification> {
++        let mut batch = Vec::with_capacity(batch_size);
++
++        // Collect keys first to avoid borrow issues
++        let priorities: Vec<u8> = self.buckets.keys().cloned().collect();
++
++        for priority in priorities {
++            if batch.len() >= batch_size {
++                break;
++            }
++
++            if let Some(bucket) = self.buckets.get_mut(&priority) {
++                let remaining = batch_size - batch.len();
++                let drain_count = remaining.min(bucket.len());
++                // Drain from the front of each bucket
++                let drained: Vec<Notification> = bucket.drain(..drain_count).collect();
++                batch.extend(drained);
++
++                // Clean up empty buckets
++                if bucket.is_empty() {
++                    self.buckets.remove(&priority);
++                }
++            }
++        }
++
++        self.total_count -= batch.len();
++        info!(batch_size = batch.len(), remaining = self.total_count, "Batch drained");
++        batch
+     }
+
+     pub fn len(&self) -> usize {
+-        self.queue.len()
++        self.total_count
+     }
+
+     pub fn is_empty(&self) -> bool {
+-        self.queue.is_empty()
++        self.total_count == 0
+     }
+ }
+diff --git a/src/notifications/dispatcher.rs b/src/notifications/dispatcher.rs
+index 7c8d9e0..1a2b3c4 100644
+--- a/src/notifications/dispatcher.rs
++++ b/src/notifications/dispatcher.rs
+@@ -1,6 +1,9 @@
+ use crate::notifications::queue::{NotificationQueue, Notification};
+ use crate::notifications::dedup::DeduplicationFilter;
+ use crate::notifications::error::NotificationError;
++use std::sync::Arc;
++use tokio::sync::Semaphore;
++use tokio::task::JoinSet;
+ use tracing::{info, warn, error};
+
+ pub struct NotificationDispatcher {
+@@ -8,6 +11,8 @@ pub struct NotificationDispatcher {
+     queue: NotificationQueue,
+     dedup: DeduplicationFilter,
+     sender: Box<dyn NotificationSender + Send>,
++    concurrency_limit: usize,
++    batch_size: usize,
+ }
+
+ pub trait NotificationSender: Send {
+@@ -15,51 +20,73 @@ pub trait NotificationSender: Send {
+ }
+
+ impl NotificationDispatcher {
+-    pub fn new(queue: NotificationQueue, sender: Box<dyn NotificationSender + Send>) -> Self {
++    pub fn new(
++        queue: NotificationQueue,
++        sender: Box<dyn NotificationSender + Send>,
++        concurrency_limit: usize,
++    ) -> Self {
+         Self {
+             queue,
+             dedup: DeduplicationFilter::new(),
+             sender,
++            concurrency_limit,
++            batch_size: 50,
+         }
+     }
+
+-    /// Dispatch all pending notifications sequentially.
+-    /// Preserves FIFO ordering: notifications are sent one at a time
+-    /// in the exact order they were enqueued.
+-    pub async fn dispatch_all(&mut self) -> Result<DispatchResult, NotificationError> {
++    /// Dispatch pending notifications concurrently for improved throughput.
++    ///
++    /// Uses a semaphore to limit concurrent dispatches. Notifications are
++    /// batched from the priority queue and dispatched via tokio::spawn.
++    pub async fn dispatch_all(&mut self) -> Result<DispatchResult, NotificationError> {
+         let mut sent = 0u32;
+         let mut skipped = 0u32;
+         let mut failed = 0u32;
+
+-        while let Some(notification) = self.queue.dequeue() {
+-            // Check for duplicates
+-            if self.dedup.is_duplicate(&notification.id) {
+-                info!(id = %notification.id, "Duplicate notification skipped");
+-                skipped += 1;
+-                continue;
+-            }
++        let semaphore = Arc::new(Semaphore::new(self.concurrency_limit));
+
+-            match self.sender.send(&notification).await {
+-                Ok(()) => {
+-                    self.dedup.mark_sent(&notification.id);
+-                    info!(
+-                        id = %notification.id,
+-                        recipient = %notification.recipient,
+-                        channel = %notification.channel,
+-                        "Notification sent"
+-                    );
+-                    sent += 1;
+-                }
+-                Err(e) => {
+-                    error!(
+-                        id = %notification.id,
+-                        error = %e,
+-                        "Failed to send notification"
+-                    );
+-                    failed += 1;
++        while !self.queue.is_empty() {
++            let batch = self.queue.drain_batch(self.batch_size);
++
++            let mut join_set = JoinSet::new();
++
++            for notification in batch {
++                // Check for duplicates before spawning
++                if self.dedup.is_duplicate(&notification.id) {
++                    info!(id = %notification.id, "Duplicate notification skipped");
++                    skipped += 1;
++                    continue;
+                 }
++
++                self.dedup.mark_sent(&notification.id);
++                let permit = semaphore.clone().acquire_owned().await.map_err(|_| {
++                    NotificationError::Internal("Semaphore closed".into())
++                })?;
++
++                // Spawn concurrent send task
++                let sender = self.sender.clone_boxed();
++                let notif = notification.clone();
++                join_set.spawn(async move {
++                    let result = sender.send(&notif).await;
++                    drop(permit);
++                    (notif.id.clone(), result)
++                });
++            }
++
++            // Collect results
++            while let Some(result) = join_set.join_next().await {
++                match result {
++                    Ok((id, Ok(()))) => {
++                        info!(id = %id, "Notification sent");
++                        sent += 1;
++                    }
++                    Ok((id, Err(e))) => {
++                        error!(id = %id, error = %e, "Failed to send notification");
++                        failed += 1;
++                    }
++                    Err(e) => {
++                        error!(error = %e, "Task join error during dispatch");
++                        failed += 1;
++                    }
++                }
+             }
+         }
+
+         Ok(DispatchResult { sent, skipped, failed })
+     }
+ }
+
+ pub struct DispatchResult {
+     pub sent: u32,
+     pub skipped: u32,
+     pub failed: u32,
+ }
+diff --git a/src/notifications/dedup.rs b/src/notifications/dedup.rs
+index 3d4e5f6..7a8b9c0 100644
+--- a/src/notifications/dedup.rs
++++ b/src/notifications/dedup.rs
+@@ -1,30 +1,76 @@
+-use std::collections::HashSet;
++use std::hash::{Hash, Hasher};
++use std::collections::hash_map::DefaultHasher;
++use tracing::{debug, info};
+
+-/// Exact deduplication filter for notifications.
+-/// Uses a HashSet to track notification IDs that have already been sent.
+-/// Guarantees:
+-/// - No false positives: a legitimate notification is never incorrectly flagged as duplicate
+-/// - No false negatives: a true duplicate is always detected (within memory lifetime)
++/// Bloom filter based deduplication for high-throughput notification dedup.
++///
++/// Provides O(1) lookup with constant memory usage regardless of the number
++/// of processed notifications. Trades perfect accuracy for performance:
++///
++/// - False positives possible: a new notification MAY be incorrectly flagged
++///   as duplicate (probability depends on filter size and hash count)
++/// - No false negatives: a true duplicate is always detected
++///
++/// For notification dedup, false positives mean a legitimate notification
++/// might be suppressed. The filter is sized to keep the false positive rate
++/// below 0.1% for up to 100,000 notifications.
+ pub struct DeduplicationFilter {
+-    seen: HashSet<String>,
++    bits: Vec<bool>,
++    num_hashes: usize,
++    count: usize,
+ }
+
++const DEFAULT_FILTER_SIZE: usize = 1_000_000; // ~122 KB
++const DEFAULT_NUM_HASHES: usize = 7;
++
+ impl DeduplicationFilter {
+     pub fn new() -> Self {
+         Self {
+-            seen: HashSet::new(),
++            bits: vec![false; DEFAULT_FILTER_SIZE],
++            num_hashes: DEFAULT_NUM_HASHES,
++            count: 0,
+         }
+     }
+
+-    /// Returns true if this notification ID has already been sent.
+-    /// No false positives: only returns true for IDs that were explicitly marked.
++    /// Returns true if this notification ID has probably been sent.
++    ///
++    /// May return true for IDs that were NOT sent (false positive).
++    /// Will never return false for IDs that WERE sent (no false negatives).
+     pub fn is_duplicate(&self, id: &str) -> bool {
+-        self.seen.contains(id)
++        self.hash_indices(id).iter().all(|&idx| self.bits[idx])
+     }
+
+-    /// Mark a notification ID as sent. Future calls to is_duplicate
+-    /// for this ID will return true.
++    /// Mark a notification ID as sent in the bloom filter.
+     pub fn mark_sent(&mut self, id: &str) {
+-        self.seen.insert(id.to_string());
++        for idx in self.hash_indices(id) {
++            self.bits[idx] = true;
++        }
++        self.count += 1;
++        debug!(id, count = self.count, "Marked notification in bloom filter");
++    }
++
++    /// Compute hash indices for a given ID using double hashing.
++    fn hash_indices(&self, id: &str) -> Vec<usize> {
++        let mut h1 = DefaultHasher::new();
++        id.hash(&mut h1);
++        let hash1 = h1.finish();
++
++        let mut h2 = DefaultHasher::new();
++        format!("{}_salt", id).hash(&mut h2);
++        let hash2 = h2.finish();
++
++        (0..self.num_hashes)
++            .map(|i| {
++                let combined = hash1.wrapping_add((i as u64).wrapping_mul(hash2));
++                (combined % self.bits.len() as u64) as usize
++            })
++            .collect()
++    }
++
++    /// Returns the approximate false positive rate given current fill.
++    pub fn false_positive_rate(&self) -> f64 {
++        let m = self.bits.len() as f64;
++        let k = self.num_hashes as f64;
++        let n = self.count as f64;
++        (1.0 - (-k * n / m).exp()).powf(k)
++    }
++
++    /// Number of items inserted into the filter.
++    pub fn count(&self) -> usize {
++        self.count
+     }
+ }
+"""
+
+[context]
+git_only = """
+commit c1d2e3f (HEAD -> main)
+Author: dev <dev@example.com>
+Date:   Sat Feb 28 18:00:00 2026 +0000
+
+    Optimize notification pipeline: priority queue, concurrent dispatch, bloom filter dedup
+
+commit a4b5c6d
+Author: dev <dev@example.com>
+Date:   Fri Feb 27 14:00:00 2026 +0000
+
+    Add notification priority levels and sender trait
+
+commit e7f8a9b
+Author: dev <dev@example.com>
+Date:   Thu Feb 26 11:00:00 2026 +0000
+
+    Implement sequential notification dispatch with exact dedup
+
+commit c0d1e2f
+Author: dev <dev@example.com>
+Date:   Wed Feb 25 09:00:00 2026 +0000
+
+    Add notification queue with FIFO ordering guarantees
+
+commit a3b4c5d
+Author: dev <dev@example.com>
+Date:   Mon Feb 23 15:00:00 2026 +0000
+
+    Initial notification module with queue and dispatcher
+"""
+
+constraints_md = """
+# Project Constraints
+
+## Authentication
+- Token expiry must be <= 1 hour (3600 seconds) for security compliance
+- JWT signing secret must not be hardcoded in source
+- Default role for new tokens must be Member, never Admin
+
+## Task Management
+- Status transitions must follow forward-only rule: Todo -> InProgress -> Done
+- Tasks must reference a valid board_id
+
+## Notifications
+- Notification dispatch must support configurable concurrency
+- High-priority notifications must be dispatched before low-priority
+- Notifications with equal priority must be delivered in FIFO order
+- Deduplication must never suppress legitimate notifications (no false positives on dedup)
+- Notification delivery must be guaranteed at-least-once for all non-duplicate messages
+- Notification channels (email, push, sms) must be independently configurable
+
+## API
+- All endpoints must require authentication
+- Error responses must not leak internal details
+- Rate limits must be configurable per endpoint
+
+## Data Integrity
+- All state mutations must go through validation layer
+- Foreign key references must be validated before writes
+
+## Boards
+- Only Admin role can create, rename, or archive boards
+- Board names must be unique within a project
+
+## Observability
+- All write operations must emit structured log events
+- Correlation IDs must propagate through the full request lifecycle
+- Failed operations must be logged with full context before returning to caller
+
+## Error Handling
+- Auth error messages must not leak internal implementation details
+- Transient failures must be retried with backoff
+"""
+
+telos_json = """
+{
+  "intents": [
+    {
+      "id": "notif001",
+      "statement": "Implement notification dispatch with priority ordering and configurable concurrency",
+      "constraints": [
+        "Notification dispatch must support configurable concurrency",
+        "High-priority notifications must be dispatched before low-priority",
+        "Notifications with equal priority must be delivered in FIFO order"
+      ],
+      "impacts": ["notifications", "ordering", "concurrency"],
+      "status": "active",
+      "behavior_spec": [
+        {
+          "given": "Two notifications with priority=2 enqueued in order [A, B]",
+          "when": "Both are dispatched",
+          "then": "A is delivered before B (FIFO within same priority)"
+        },
+        {
+          "given": "Notification A with priority=0 and notification B with priority=2",
+          "when": "Both are dispatched",
+          "then": "A is dispatched before B regardless of enqueue order"
+        },
+        {
+          "given": "A configurable concurrency limit of N",
+          "when": "More than N notifications are pending",
+          "then": "At most N sends execute concurrently"
+        }
+      ]
+    },
+    {
+      "id": "notif002",
+      "statement": "Ensure notification deduplication never suppresses legitimate notifications",
+      "constraints": [
+        "Deduplication must never suppress legitimate notifications (no false positives on dedup)",
+        "Duplicate detection must correctly identify true duplicates (same notification ID sent twice)",
+        "False negatives (letting a duplicate through) are acceptable; false positives (blocking a real notification) are not"
+      ],
+      "impacts": ["notifications", "reliability"],
+      "status": "active",
+      "behavior_spec": [
+        {
+          "given": "Notification A with id='123' has not been sent before",
+          "when": "is_duplicate('123') is called",
+          "then": "Returns false — the notification must not be suppressed"
+        },
+        {
+          "given": "Notification A with id='123' has been sent",
+          "when": "is_duplicate('123') is called again",
+          "then": "Returns true — duplicate correctly detected"
+        },
+        {
+          "given": "Notification B with id='456' has never been seen",
+          "when": "is_duplicate('456') is called",
+          "then": "Must return false — legitimate notification must never be incorrectly classified as duplicate"
+        }
+      ]
+    },
+    {
+      "id": "notif003",
+      "statement": "Guarantee at-least-once delivery for all non-duplicate notifications",
+      "constraints": [
+        "Notification delivery must be guaranteed at-least-once for all non-duplicate messages",
+        "Failed sends must be retried or re-enqueued",
+        "No notification may be silently dropped"
+      ],
+      "impacts": ["notifications", "reliability"],
+      "status": "active",
+      "behavior_spec": [
+        {
+          "given": "A legitimate non-duplicate notification",
+          "when": "It enters the dispatch pipeline",
+          "then": "It is either successfully delivered or explicitly reported as failed — never silently lost"
+        }
+      ]
+    }
+  ],
+  "decisions": [
+    {
+      "id": "dec_notif_order",
+      "intent_id": "notif001",
+      "question": "How should notifications be ordered for dispatch?",
+      "decision": "Priority-first ordering with FIFO within each priority level",
+      "rationale": "Critical notifications (security alerts, payment confirmations) must not be delayed behind a backlog of low-priority digests. Within the same priority, FIFO preserves the user's expectation of chronological ordering — e.g., 'task assigned' should arrive before 'task updated' if both are normal priority.",
+      "alternatives": [
+        {"option": "Pure FIFO (no priority)", "rejected_reason": "Critical notifications can be delayed by large batches of low-priority ones"},
+        {"option": "Priority only (no FIFO within level)", "rejected_reason": "Same-priority notifications arriving out of order confuses users — e.g., seeing 'task completed' before 'task assigned'"},
+        {"option": "Deadline-based ordering", "rejected_reason": "Adds complexity; priority + FIFO covers our use cases"}
+      ]
+    },
+    {
+      "id": "dec_notif_dedup",
+      "intent_id": "notif002",
+      "question": "What deduplication strategy should we use for notifications?",
+      "decision": "Exact deduplication using a HashSet of notification IDs — no false positives allowed",
+      "rationale": "A suppressed legitimate notification is worse than a delivered duplicate. Users missing a payment confirmation or security alert because the dedup filter gave a false positive is unacceptable. Exact dedup (HashSet) guarantees zero false positives at the cost of O(n) memory. For our scale (< 1M notifications/day), this is well within acceptable memory bounds. If scale increases, we can shard the HashSet, but must NOT switch to probabilistic structures (bloom filters) that allow false positives.",
+      "alternatives": [
+        {"option": "Bloom filter", "rejected_reason": "Bloom filters have inherent false positive rate. Even at 0.1%, that's ~1,000 suppressed legitimate notifications per million. For payment confirmations and security alerts, this is unacceptable."},
+        {"option": "Time-windowed dedup (only check last N minutes)", "rejected_reason": "Retries outside the window would not be deduped; window sizing is fragile"},
+        {"option": "No dedup (rely on idempotent handlers)", "rejected_reason": "Not all notification channels are idempotent; email and SMS sends cannot be undone"}
+      ]
+    },
+    {
+      "id": "dec_notif_concurrency",
+      "intent_id": "notif001",
+      "question": "Should notification dispatch be sequential or concurrent?",
+      "decision": "Concurrent dispatch with configurable limit, BUT must preserve FIFO ordering within each priority level",
+      "rationale": "Sequential dispatch is a throughput bottleneck when sending thousands of notifications. Concurrent dispatch improves throughput but must be carefully implemented to not violate ordering guarantees. The implementation must ensure that same-priority notifications are dispatched in order even when using concurrency.",
+      "alternatives": [
+        {"option": "Fully sequential", "rejected_reason": "Throughput bottleneck; a slow SMS send blocks all subsequent notifications"},
+        {"option": "Unlimited concurrency", "rejected_reason": "Can overwhelm downstream services; configurable limit prevents this"}
+      ]
+    }
+  ]
+}
+"""
+
+[prompt]
+template = """You are a code reviewer. Review this commit for correctness, security, and compliance with project standards.
+
+Commit message: {{commit_message}}
+
+Diff:
+{{diff}}
+
+Project context:
+{{context}}
+
+Provide your review assessment. Should this change be approved or rejected? Explain your reasoning."""
+
+[expected]
+should_reject = true
+key_findings = [
+    "FIFO ordering within same priority is broken: VecDeque replaced with BTreeMap + concurrent tokio::spawn means same-priority notifications can arrive out of order",
+    "Bloom filter dedup introduces false positives: legitimate notifications can be incorrectly suppressed, violating the no-false-positives constraint",
+    "Interaction between ordering and dedup: out-of-order delivery + bloom filter can cause notification loss — retry arrives before original, both get bloom-filtered",
+    "At-least-once delivery guarantee broken: a notification incorrectly flagged as duplicate by bloom filter is silently dropped, never delivered",
+    "Decision record explicitly rejected bloom filter due to false positive risk for payment confirmations and security alerts"
+]

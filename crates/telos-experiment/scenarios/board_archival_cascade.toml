@@ -1,0 +1,370 @@
+[scenario]
+name = "board_archival_cascade"
+category = "true_positive"
+description = "Board archival feature that orphans associated tasks by removing board from active store without reassigning tasks"
+
+[diff]
+commit_message = "Add board archival with admin-only access, validation, and audit logging"
+content = """
+diff --git a/src/boards/store.rs b/src/boards/store.rs
+index 2c3d4e5..6f7a8b9 100644
+--- a/src/boards/store.rs
++++ b/src/boards/store.rs
+@@ -1,5 +1,7 @@
+ use std::collections::HashMap;
++use chrono::Utc;
+ use crate::boards::error::BoardError;
++use tracing::{info, warn};
+
+ #[derive(Debug, Clone)]
+ pub struct Board {
+@@ -8,12 +10,15 @@ pub struct Board {
+     pub name: String,
+     pub description: String,
+     pub is_default: bool,
++    pub archived: bool,
++    pub archived_at: Option<String>,
+     pub created_by: String,
+ }
+
+ pub struct BoardStore {
+     boards: HashMap<String, Board>,
+     default_board_id: String,
++    archived_boards: HashMap<String, Board>,
+ }
+
+ impl BoardStore {
+@@ -22,6 +27,7 @@ impl BoardStore {
+         Self {
+             boards: HashMap::new(),
+             default_board_id: String::new(),
++            archived_boards: HashMap::new(),
+         }
+     }
+
+@@ -54,6 +60,59 @@ impl BoardStore {
+         self.boards.remove(id).ok_or(BoardError::NotFound(id.to_string()))
+     }
+
++    /// Archives a board by moving it from active to archived storage.
++    /// Validates that the board exists and is not the default board.
++    /// Returns the archived board for confirmation.
++    pub fn archive_board(&mut self, id: &str) -> Result<Board, BoardError> {
++        // Cannot archive the default board
++        if id == self.default_board_id {
++            warn!(board_id = %id, "Attempt to archive default board rejected");
++            return Err(BoardError::CannotArchiveDefault);
++        }
++
++        // Remove from active boards
++        let mut board = self.boards.remove(id).ok_or_else(|| {
++            BoardError::NotFound(id.to_string())
++        })?;
++
++        // Mark as archived with timestamp
++        board.archived = true;
++        board.archived_at = Some(Utc::now().to_rfc3339());
++
++        info!(
++            board_id = %id,
++            board_name = %board.name,
++            archived_at = ?board.archived_at,
++            "Board archived successfully"
++        );
++
++        // Store in archived boards for potential future restoration
++        self.archived_boards.insert(id.to_string(), board.clone());
++
++        Ok(board)
++    }
++
++    /// List all archived boards.
++    pub fn list_archived(&self) -> Vec<&Board> {
++        self.archived_boards.values().collect()
++    }
++
++    /// Restore a previously archived board back to active.
++    pub fn restore_board(&mut self, id: &str) -> Result<Board, BoardError> {
++        let mut board = self.archived_boards.remove(id).ok_or_else(|| {
++            BoardError::NotFound(id.to_string())
++        })?;
++
++        board.archived = false;
++        board.archived_at = None;
++
++        info!(
++            board_id = %id,
++            board_name = %board.name,
++            "Board restored from archive"
++        );
++
++        self.boards.insert(id.to_string(), board.clone());
++        Ok(board)
++    }
++
+     pub fn list(&self) -> Vec<&Board> {
+         self.boards.values().collect()
+     }
+diff --git a/src/boards/api.rs b/src/boards/api.rs
+index 8a9b0c1..2d3e4f5 100644
+--- a/src/boards/api.rs
++++ b/src/boards/api.rs
+@@ -1,6 +1,8 @@
+ use crate::auth::middleware::UserContext;
+ use crate::auth::role::UserRole;
+ use crate::boards::store::BoardStore;
++use crate::boards::error::BoardError;
++use crate::audit::AuditLog;
+ use tracing::{info, warn};
+
+ pub struct BoardApi {
+@@ -8,12 +10,14 @@ pub struct BoardApi {
+     store: BoardStore,
++    audit_log: AuditLog,
+ }
+
+ impl BoardApi {
+-    pub fn new(store: BoardStore) -> Self {
+-        Self { store }
++    pub fn new(store: BoardStore, audit_log: AuditLog) -> Self {
++        Self { store, audit_log }
+     }
+
+     pub fn create_board(&mut self, ctx: &UserContext, name: &str, desc: &str) -> Result<String, BoardError> {
+@@ -42,6 +46,40 @@ impl BoardApi {
+         Ok(board.id.clone())
+     }
+
++    /// Archive a board. Only Admin users can archive boards.
++    /// The default board cannot be archived.
++    pub fn archive_board(&mut self, ctx: &UserContext, board_id: &str) -> Result<(), BoardError> {
++        // Authorization: Admin only
++        if ctx.role != UserRole::Admin {
++            warn!(
++                user_id = %ctx.user_id,
++                role = ?ctx.role,
++                board_id = %board_id,
++                "Non-admin user attempted to archive board"
++            );
++            return Err(BoardError::Unauthorized);
++        }
++
++        // Perform archival
++        let archived_board = self.store.archive_board(board_id)?;
++
++        // Audit log
++        self.audit_log.record(
++            "board.archived",
++            &ctx.user_id,
++            &serde_json::json!({
++                "board_id": board_id,
++                "board_name": archived_board.name,
++                "archived_at": archived_board.archived_at,
++            }),
++        );
++
++        info!(
++            user_id = %ctx.user_id,
++            board_id = %board_id,
++            board_name = %archived_board.name,
++            "Board archived by admin"
++        );
++
++        Ok(())
++    }
++
+     pub fn list_boards(&self) -> Vec<BoardSummary> {
+         self.store.list().iter().map(|b| BoardSummary {
+             id: b.id.clone(),
+"""
+
+[context]
+git_only = """
+commit a7b8c9d (HEAD -> main)
+Author: dev <dev@example.com>
+Date:   Sat Feb 28 14:00:00 2026 +0000
+
+    Add board archival with admin-only access, validation, and audit logging
+
+commit e1f2a3b
+Author: dev <dev@example.com>
+Date:   Fri Feb 27 09:00:00 2026 +0000
+
+    Add audit logging module for compliance tracking
+
+commit c4d5e6f
+Author: dev <dev@example.com>
+Date:   Thu Feb 26 16:00:00 2026 +0000
+
+    Implement board CRUD with default board support
+
+commit a7b8c9d
+Author: dev <dev@example.com>
+Date:   Wed Feb 25 11:00:00 2026 +0000
+
+    Add task-board association and list_by_board query
+
+commit e0f1a2b
+Author: dev <dev@example.com>
+Date:   Mon Feb 23 10:00:00 2026 +0000
+
+    Initial project setup with board and task modules
+"""
+
+constraints_md = """
+# Project Constraints
+
+## Authentication
+- Token expiry must be <= 1 hour (3600 seconds) for security compliance
+- JWT signing secret must not be hardcoded in source
+- Default role for new tokens must be Member, never Admin
+
+## Task Management
+- Status transitions must follow forward-only rule: Todo -> InProgress -> Done
+- Backward transitions (Done -> Todo) are not allowed without explicit reset
+- Tasks must reference a valid board_id
+- All task mutations must go through the validation layer
+
+## Boards
+- Only Admin role can create, rename, or archive boards
+- Default board cannot be deleted or archived
+- Board names must be unique within a project
+- Board deletion or archival must first reassign or archive all associated tasks; orphaned tasks are prohibited
+
+## Data Integrity
+- All entity lifecycle operations must maintain referential integrity across stores
+- Foreign key references must be validated before writes
+- Cascading operations must be explicit, not implicit
+- All state mutations must go through validation layer
+
+## API
+- All endpoints must require authentication
+- Error responses must not leak internal details
+- Rate limits must be configurable per endpoint
+
+## Audit
+- Admin-level operations must be recorded in the audit trail
+- Audit entries must include actor, action, target, and timestamp
+- Audit log must be append-only
+
+## Error Handling
+- Auth error messages must not leak internal implementation details
+- Failed operations must be logged with full context
+"""
+
+telos_json = """
+{
+  "intents": [
+    {
+      "id": "board001",
+      "statement": "Implement board lifecycle management with archival support",
+      "constraints": [
+        "Only Admin role can create, rename, or archive boards",
+        "Default board cannot be deleted or archived",
+        "Board names must be unique within a project"
+      ],
+      "impacts": ["boards", "authorization"],
+      "status": "active",
+      "behavior_spec": [
+        {
+          "given": "A user with Member role",
+          "when": "They attempt to archive a board",
+          "then": "Return Unauthorized error"
+        },
+        {
+          "given": "The default board",
+          "when": "An admin attempts to archive it",
+          "then": "Return CannotArchiveDefault error"
+        }
+      ]
+    },
+    {
+      "id": "board002",
+      "statement": "Ensure board lifecycle operations maintain referential integrity with tasks",
+      "constraints": [
+        "Board deletion or archival must first reassign or archive all associated tasks; orphaned tasks are prohibited",
+        "All entity lifecycle operations must maintain referential integrity across stores",
+        "Tasks must reference a valid board_id at all times"
+      ],
+      "impacts": ["boards", "tasks", "data-integrity"],
+      "status": "active",
+      "behavior_spec": [
+        {
+          "given": "A board with 5 associated tasks",
+          "when": "The board is archived",
+          "then": "All 5 tasks are either reassigned to another board or archived with the board"
+        },
+        {
+          "given": "A board with associated tasks",
+          "when": "archive_board is called",
+          "then": "TaskStore::list_by_board(board_id) returns no orphaned tasks after archival"
+        },
+        {
+          "given": "Any entity lifecycle operation",
+          "when": "It removes or changes an entity referenced by other entities",
+          "then": "All referencing entities are updated to maintain valid references"
+        }
+      ]
+    },
+    {
+      "id": "audit001",
+      "statement": "Record all admin-level operations in the audit trail",
+      "constraints": [
+        "Admin-level operations must be recorded in the audit trail",
+        "Audit entries must include actor, action, target, and timestamp",
+        "Audit log must be append-only"
+      ],
+      "impacts": ["audit", "compliance"],
+      "status": "active"
+    }
+  ],
+  "decisions": [
+    {
+      "id": "dec_board_archive",
+      "intent_id": "board002",
+      "question": "What should happen to tasks when their parent board is archived?",
+      "decision": "Tasks must be explicitly reassigned to another active board or archived along with the board. Orphaned tasks (tasks referencing a non-active board) are never acceptable.",
+      "rationale": "Orphaned tasks become invisible in the UI (list_by_board queries only active boards), creating data loss from the user's perspective. Tasks may contain critical work items that silently disappear. This is worse than an error — it's silent data loss.",
+      "alternatives": [
+        {"option": "Automatically delete associated tasks", "rejected_reason": "Data loss risk; tasks may contain important information that users need to migrate"},
+        {"option": "Allow orphaned tasks and show them in a special view", "rejected_reason": "Adds UI complexity and risks tasks being forgotten; violates referential integrity principle"},
+        {"option": "Block archival if tasks exist", "rejected_reason": "Poor UX; forces manual task migration before archival, but is acceptable as a simpler alternative"}
+      ]
+    },
+    {
+      "id": "dec_board_admin_only",
+      "intent_id": "board001",
+      "question": "Who should be able to archive boards?",
+      "decision": "Only Admin role can archive boards",
+      "rationale": "Board archival affects all users who have tasks on that board. Restricting to Admin ensures proper oversight and prevents accidental data disruption by Members.",
+      "alternatives": [
+        {"option": "Allow board creator to archive", "rejected_reason": "Creator may no longer be active; role-based is more reliable"},
+        {"option": "Allow any Member", "rejected_reason": "Too permissive; archival has team-wide impact"}
+      ]
+    }
+  ]
+}
+"""
+
+[prompt]
+template = """You are a code reviewer. Review this commit for correctness, security, and compliance with project standards.
+
+Commit message: {{commit_message}}
+
+Diff:
+{{diff}}
+
+Project context:
+{{context}}
+
+Provide your review assessment. Should this change be approved or rejected? Explain your reasoning."""
+
+[expected]
+should_reject = true
+key_findings = [
+    "board archival removes board from active boards HashMap but does not reassign or archive associated tasks",
+    "tasks referencing the archived board become orphaned — list_by_board queries active boards only",
+    "violates constraint that board archival must first handle all associated tasks",
+    "violates referential integrity — tasks will have board_id pointing to a non-active board",
+    "silent data loss: tasks become invisible in UI without any error or warning"
+]

@@ -1,0 +1,351 @@
+[scenario]
+name = "rate_limit_config_migration"
+category = "true_positive"
+description = "Rate limit migration to config sets login endpoint default to 100 rpm, violating the 10 rpm credential-stuffing defense decision"
+
+[diff]
+commit_message = "Migrate rate limiting from hardcoded values to configurable RateLimitConfig"
+content = """
+diff --git a/src/api/rate_limit.rs b/src/api/rate_limit.rs
+index 4e5f6a7..8b9c0d1 100644
+--- a/src/api/rate_limit.rs
++++ b/src/api/rate_limit.rs
+@@ -1,33 +1,74 @@
+-use std::collections::HashMap;
++use std::collections::HashMap;
+ use std::time::{Duration, Instant};
++use tracing::{info, warn};
+
+-/// Rate limiter with hardcoded limits.
+-/// TODO: Make configurable (tracked in issue #142)
++/// A configurable per-endpoint rate limiter.
++///
++/// Rate limits can be configured via `config.toml` or programmatically
++/// using `RateLimitConfig`. Each endpoint can have its own limit.
++///
++/// # Example
++/// ```rust
++/// let config = RateLimitConfig::default();
++/// let limiter = RateLimiter::new(config);
++/// ```
+ pub struct RateLimiter {
+-    requests: HashMap<String, Vec<Instant>>,
+-    window: Duration,
++    config: RateLimitConfig,
++    /// Per-IP request timestamps, keyed by "{endpoint}:{ip}"
++    requests: HashMap<String, Vec<Instant>>,
++    window: Duration,
++}
++
++/// Configuration for per-endpoint rate limiting.
++///
++/// Loaded from `config.toml` at startup. Each field specifies
++/// the maximum number of requests per minute for that endpoint.
++///
++/// # Fields
++/// - `default_rpm`: Fallback limit for endpoints without specific config
++/// - `login_rpm`: Limit for `/auth/login` — authentication attempts
++/// - `api_rpm`: Limit for general `/api/*` endpoints
++/// - `upload_rpm`: Limit for file upload endpoints
++/// - `health_rpm`: Limit for health check endpoints
++#[derive(Debug, Clone, serde::Deserialize)]
++pub struct RateLimitConfig {
++    /// Default rate limit for unconfigured endpoints
++    pub default_rpm: u32,
++    /// Rate limit for login/authentication endpoint
++    pub login_rpm: u32,
++    /// Rate limit for general API endpoints
++    pub api_rpm: u32,
++    /// Rate limit for file upload endpoints
++    pub upload_rpm: u32,
++    /// Rate limit for health check endpoints
++    pub health_rpm: u32,
++}
++
++impl Default for RateLimitConfig {
++    fn default() -> Self {
++        Self {
++            default_rpm: 60,
++            login_rpm: 100,
++            api_rpm: 120,
++            upload_rpm: 20,
++            health_rpm: 300,
++        }
++    }
+ }
+
+ impl RateLimiter {
+-    pub fn new() -> Self {
++    /// Create a new rate limiter with the given configuration.
++    pub fn new(config: RateLimitConfig) -> Self {
++        info!(
++            default = config.default_rpm,
++            login = config.login_rpm,
++            api = config.api_rpm,
++            upload = config.upload_rpm,
++            health = config.health_rpm,
++            "Rate limiter initialized with config"
++        );
+         Self {
++            config,
+             requests: HashMap::new(),
+             window: Duration::from_secs(60),
+         }
+     }
+
+-    pub fn check_rate_limit(&mut self, ip: &str) -> bool {
+-        let now = Instant::now();
+-        let entries = self.requests.entry(ip.to_string()).or_default();
++    /// Check whether a request from the given IP to the given endpoint
++    /// should be allowed under the current rate limit configuration.
++    pub fn check_rate_limit(&mut self, endpoint: &str, ip: &str) -> bool {
++        let key = format!("{}:{}", endpoint, ip);
++        let limit = self.get_limit(endpoint);
++        let now = Instant::now();
++        let entries = self.requests.entry(key).or_default();
+
+         // Remove expired entries outside the window
+         entries.retain(|t| now.duration_since(*t) < self.window);
+
+-        // Hardcoded limit: 60 requests per minute
+-        if entries.len() >= 60 {
++        if entries.len() as u32 >= limit {
++            warn!(endpoint, ip, limit, count = entries.len(), "Rate limit exceeded");
+             return false;
+         }
+
+         entries.push(now);
+         true
+     }
++
++    /// Resolve the rate limit for a given endpoint path.
++    fn get_limit(&self, endpoint: &str) -> u32 {
++        if endpoint.starts_with("/auth/login") {
++            self.config.login_rpm
++        } else if endpoint.starts_with("/api/upload") {
++            self.config.upload_rpm
++        } else if endpoint.starts_with("/health") {
++            self.config.health_rpm
++        } else if endpoint.starts_with("/api/") {
++            self.config.api_rpm
++        } else {
++            self.config.default_rpm
++        }
++    }
++
++    /// Reset rate limit state (useful for testing).
++    pub fn reset(&mut self) {
++        self.requests.clear();
++    }
+ }
+diff --git a/src/api/config.rs b/src/api/config.rs
+index 9c0d1e2..3f4a5b6 100644
+--- a/src/api/config.rs
++++ b/src/api/config.rs
+@@ -1,4 +1,5 @@
+ use serde::Deserialize;
++use crate::api::rate_limit::RateLimitConfig;
+
+ /// Application configuration loaded from `config.toml`.
+ #[derive(Debug, Clone, Deserialize)]
+@@ -8,6 +9,9 @@ pub struct AppConfig {
+     /// Server port
+     pub port: u16,
+
++    /// Rate limiting configuration
++    pub rate_limit: RateLimitConfig,
++
+     /// Database connection string
+     pub database_url: String,
+
+@@ -22,6 +26,7 @@ impl Default for AppConfig {
+         Self {
+             host: "127.0.0.1".to_string(),
+             port: 8080,
++            rate_limit: RateLimitConfig::default(),
+             database_url: "sqlite://data.db".to_string(),
+             log_level: "info".to_string(),
+         }
+"""
+
+[context]
+git_only = """
+commit b9c0d1e (HEAD -> main)
+Author: dev <dev@example.com>
+Date:   Sat Feb 28 11:00:00 2026 +0000
+
+    Migrate rate limiting from hardcoded values to configurable RateLimitConfig
+
+commit f2a3b4c
+Author: dev <dev@example.com>
+Date:   Fri Feb 27 15:00:00 2026 +0000
+
+    Add serde Deserialize to config structs for TOML loading
+
+commit d5e6f7a
+Author: dev <dev@example.com>
+Date:   Thu Feb 26 10:00:00 2026 +0000
+
+    Implement basic rate limiter with 60 rpm global limit
+
+commit a8b9c0d
+Author: dev <dev@example.com>
+Date:   Wed Feb 25 08:00:00 2026 +0000
+
+    Add structured logging to API module
+
+commit e1f2a3b
+Author: dev <dev@example.com>
+Date:   Mon Feb 23 14:00:00 2026 +0000
+
+    Initial API module with config loading
+"""
+
+constraints_md = """
+# Project Constraints
+
+## Authentication
+- Token expiry must be <= 1 hour (3600 seconds) for security compliance
+- JWT signing secret must not be hardcoded in source
+- Default role for new tokens must be Member, never Admin
+
+## Task Management
+- Status transitions must follow forward-only rule: Todo -> InProgress -> Done
+- Tasks must reference a valid board_id
+- All task mutations must go through the validation layer
+
+## API
+- All endpoints must require authentication
+- Error responses must not leak internal details
+- Rate limit configuration must be externalizable (not hardcoded)
+- Rate limits must be configurable per-endpoint
+- Default rate limits must be provided for all endpoints
+- Login endpoint rate limit must be <= 10 requests/minute per IP to prevent credential stuffing attacks
+
+## Security
+- Auth error messages must not leak internal implementation details
+- Failed login attempts must be rate-limited to prevent brute force
+- All security-relevant configuration changes must be reviewed
+
+## Data Integrity
+- All state mutations must go through validation layer
+- Foreign key references must be validated before writes
+
+## Boards
+- Only Admin role can create, rename, or archive boards
+- Board names must be unique within a project
+
+## Observability
+- All write operations must emit structured log events
+- Rate limit violations must be logged with endpoint and IP
+"""
+
+telos_json = """
+{
+  "intents": [
+    {
+      "id": "rl001",
+      "statement": "Implement configurable per-endpoint rate limiting",
+      "constraints": [
+        "Rate limit configuration must be externalizable (not hardcoded)",
+        "Rate limits must be configurable per-endpoint",
+        "Default rate limits must be provided for all endpoints"
+      ],
+      "impacts": ["api", "security", "configuration"],
+      "status": "active",
+      "behavior_spec": [
+        {
+          "given": "A config.toml with rate_limit section",
+          "when": "Application starts",
+          "then": "Rate limiter uses configured values instead of defaults"
+        },
+        {
+          "given": "An endpoint not explicitly configured",
+          "when": "Rate limit is checked",
+          "then": "The default_rpm value is used"
+        }
+      ]
+    },
+    {
+      "id": "rl002",
+      "statement": "Enforce strict rate limiting on login endpoint to prevent credential stuffing",
+      "constraints": [
+        "Login endpoint rate limit must be <= 10 requests/minute per IP to prevent credential stuffing attacks",
+        "Failed login attempts must be rate-limited to prevent brute force"
+      ],
+      "impacts": ["security", "auth"],
+      "status": "active",
+      "behavior_spec": [
+        {
+          "given": "A single IP making login requests",
+          "when": "11th request in 60 seconds is received",
+          "then": "Request is rejected with rate limit error"
+        },
+        {
+          "given": "An attacker attempting credential stuffing",
+          "when": "They send rapid login requests from one IP",
+          "then": "Only 10 attempts per minute are allowed, making brute force infeasible"
+        }
+      ]
+    },
+    {
+      "id": "sec001",
+      "statement": "Ensure auth error messages do not leak internal details to clients",
+      "constraints": [
+        "Error messages must not leak internal implementation details",
+        "Auth errors should return generic messages to prevent information disclosure"
+      ],
+      "impacts": ["auth", "security"],
+      "status": "active"
+    }
+  ],
+  "decisions": [
+    {
+      "id": "dec_login_rl",
+      "intent_id": "rl002",
+      "question": "What should the login endpoint rate limit be?",
+      "decision": "10 requests per minute per IP",
+      "rationale": "At 10 req/min, an attacker can try only 600 passwords per hour per IP, making credential stuffing attacks impractical. Higher limits (50-100) allow thousands of attempts per hour, which combined with common password lists makes brute force feasible. The 10/min limit was validated against normal user behavior: legitimate users rarely fail login more than 3 times in a minute.",
+      "alternatives": [
+        {"option": "100 requests per minute", "rejected_reason": "Allows 6,000 attempts/hour — practical for credential stuffing with top-1000 password lists. Defeats the purpose of rate limiting login."},
+        {"option": "30 requests per minute", "rejected_reason": "Still allows 1,800 attempts/hour. Better than 100 but still within range of automated attacks."},
+        {"option": "5 requests per minute", "rejected_reason": "Too aggressive for legitimate users who may have multiple accounts or are entering complex passwords with typos."},
+        {"option": "Progressive backoff (no fixed limit)", "rejected_reason": "More complex to implement and configure. Fixed limit is simpler and sufficient for our threat model."}
+      ]
+    },
+    {
+      "id": "dec_config_ext",
+      "intent_id": "rl001",
+      "question": "Should rate limits be hardcoded or configurable?",
+      "decision": "Configurable via config.toml with sensible defaults",
+      "rationale": "Hardcoded values require code changes and redeployment to adjust. Config file allows ops team to tune limits based on observed traffic patterns without developer involvement.",
+      "alternatives": [
+        {"option": "Environment variables only", "rejected_reason": "Harder to manage multiple values; config file is more structured"},
+        {"option": "Database-driven config", "rejected_reason": "Over-engineering for current needs; config file is sufficient"}
+      ]
+    }
+  ]
+}
+"""
+
+[prompt]
+template = """You are a code reviewer. Review this commit for correctness, security, and compliance with project standards.
+
+Commit message: {{commit_message}}
+
+Diff:
+{{diff}}
+
+Project context:
+{{context}}
+
+Provide your review assessment. Should this change be approved or rejected? Explain your reasoning."""
+
+[expected]
+should_reject = true
+key_findings = [
+    "Default login_rpm set to 100 in RateLimitConfig::default(), violating the <= 10 rpm constraint",
+    "100 requests/minute allows 6000 attempts/hour, making credential stuffing feasible",
+    "The explicit decision recorded 10 rpm with detailed rationale about credential stuffing defense",
+    "Rest of the refactor is correct — only the login default value is wrong"
+]
