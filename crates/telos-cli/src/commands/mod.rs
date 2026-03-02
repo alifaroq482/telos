@@ -14,3 +14,4 @@ pub mod reindex;
 pub mod show;
 pub mod stream;
 pub mod supersede;
+pub mod sync;

@@ -1,5 +1,6 @@
 use assert_cmd::Command;
 use serde_json::Value;
+use std::fs;
 use std::process;
 use tempfile::TempDir;
 
@@ -1292,4 +1293,261 @@ fn changeset_for_commit() {
     let arr = parsed.as_array().unwrap();
     assert_eq!(arr.len(), 1);
     assert!(arr[0]["changeset"]["git_commit"].is_string());
+}
+
+// ========== Sync Integration Tests ==========
+
+#[test]
+fn sync_creates_and_updates_claude_md() {
+    let dir = TempDir::new().unwrap();
+    telos().arg("init").current_dir(dir.path()).assert().success();
+
+    // Create an intent first (needed for source_intent on constraints)
+    telos()
+        .args(["intent", "-s", "Auth system", "--impact", "auth"])
+        .current_dir(dir.path())
+        .assert()
+        .success();
+
+    // Create a Must constraint
+    telos()
+        .args([
+            "constraint",
+            "-s", "Token expiry must be <= 1 hour",
+            "--severity", "must",
+            "--impact", "auth",
+        ])
+        .current_dir(dir.path())
+        .assert()
+        .success();
+
+    // Create a Should constraint
+    telos()
+        .args([
+            "constraint",
+            "-s", "Use HTTPS everywhere",
+            "--severity", "should",
+            "--impact", "security",
+        ])
+        .current_dir(dir.path())
+        .assert()
+        .success();
+
+    // Create a Prefer constraint
+    telos()
+        .args([
+            "constraint",
+            "-s", "Prefer async handlers",
+            "--severity", "prefer",
+            "--impact", "performance",
+        ])
+        .current_dir(dir.path())
+        .assert()
+        .success();
+
+    // 1. Sync to CLAUDE.md — default should include Must+Should only
+    telos()
+        .args(["sync", "--target", "claude"])
+        .current_dir(dir.path())
+        .assert()
+        .success()
+        .stdout(predicates::str::contains("2 constraints"));
+
+    let claude_md = dir.path().join("CLAUDE.md");
+    assert!(claude_md.exists(), "CLAUDE.md should be created");
+    let content = fs::read_to_string(&claude_md).unwrap();
+    assert!(content.contains("Token expiry must be <= 1 hour"));
+    assert!(content.contains("Use HTTPS everywhere"));
+    assert!(!content.contains("Prefer async handlers"), "Prefer should be excluded by default");
+    assert!(content.contains("<!-- TELOS-CONSTRAINTS:START -->"));
+    assert!(content.contains("<!-- TELOS-CONSTRAINTS:END -->"));
+    assert!(content.contains("telos query constraints --file <path> --json"));
+
+    // 2. Run again — idempotent (markers replaced, still 2 constraints)
+    telos()
+        .args(["sync", "--target", "claude"])
+        .current_dir(dir.path())
+        .assert()
+        .success()
+        .stdout(predicates::str::contains("2 constraints"));
+
+    let content2 = fs::read_to_string(&claude_md).unwrap();
+    // Structure should be the same (timestamps may differ but markers are the same)
+    assert!(content2.contains("Token expiry must be <= 1 hour"));
+    assert!(content2.contains("Use HTTPS everywhere"));
+    assert!(!content2.contains("Prefer async handlers"));
+
+    // 3. Sync with --all — Prefer now included
+    telos()
+        .args(["sync", "--target", "claude", "--all"])
+        .current_dir(dir.path())
+        .assert()
+        .success()
+        .stdout(predicates::str::contains("3 constraints"));
+
+    let content3 = fs::read_to_string(&claude_md).unwrap();
+    assert!(content3.contains("Prefer async handlers"), "--all should include Prefer");
+
+    // 4. Dry run — file should not change
+    let before_dry = fs::read_to_string(&claude_md).unwrap();
+    telos()
+        .args(["sync", "--target", "claude", "--only-must", "--dry-run"])
+        .current_dir(dir.path())
+        .assert()
+        .success()
+        .stdout(predicates::str::contains("would be synced"));
+
+    let after_dry = fs::read_to_string(&claude_md).unwrap();
+    assert_eq!(before_dry, after_dry, "dry-run should not modify the file");
+
+    // 5. Remove managed section
+    telos()
+        .args(["sync", "--target", "claude", "--remove"])
+        .current_dir(dir.path())
+        .assert()
+        .success()
+        .stdout(predicates::str::contains("Removed managed section"));
+
+    // File should have been deleted since it was only the managed section
+    assert!(!claude_md.exists() || fs::read_to_string(&claude_md).unwrap().trim().is_empty(),
+        "CLAUDE.md should be removed or empty after removing the only content");
+}
+
+#[test]
+fn sync_preserves_existing_content() {
+    let dir = TempDir::new().unwrap();
+    telos().arg("init").current_dir(dir.path()).assert().success();
+
+    // Create an intent and constraint
+    telos()
+        .args(["intent", "-s", "Test intent", "--impact", "test"])
+        .current_dir(dir.path())
+        .assert()
+        .success();
+
+    telos()
+        .args([
+            "constraint",
+            "-s", "Must test everything",
+            "--severity", "must",
+            "--impact", "test",
+        ])
+        .current_dir(dir.path())
+        .assert()
+        .success();
+
+    // Create CLAUDE.md with existing content
+    let claude_md = dir.path().join("CLAUDE.md");
+    fs::write(&claude_md, "# My Project\n\nThis is my custom content.\n").unwrap();
+
+    // Sync — should append to existing content
+    telos()
+        .args(["sync", "--target", "claude"])
+        .current_dir(dir.path())
+        .assert()
+        .success();
+
+    let content = fs::read_to_string(&claude_md).unwrap();
+    assert!(content.contains("# My Project"), "existing content should be preserved");
+    assert!(content.contains("This is my custom content."), "existing content should be preserved");
+    assert!(content.contains("Must test everything"), "constraint should be added");
+
+    // Remove — existing content should remain
+    telos()
+        .args(["sync", "--target", "claude", "--remove"])
+        .current_dir(dir.path())
+        .assert()
+        .success();
+
+    let content = fs::read_to_string(&claude_md).unwrap();
+    assert!(content.contains("# My Project"), "existing content should survive removal");
+    assert!(!content.contains("TELOS-CONSTRAINTS"), "markers should be gone");
+}
+
+#[test]
+fn sync_unknown_target_fails() {
+    let dir = TempDir::new().unwrap();
+    telos().arg("init").current_dir(dir.path()).assert().success();
+
+    telos()
+        .args(["sync", "--target", "unknown"])
+        .current_dir(dir.path())
+        .assert()
+        .failure();
+}
+
+#[test]
+fn sync_only_must_filters_correctly() {
+    let dir = TempDir::new().unwrap();
+    telos().arg("init").current_dir(dir.path()).assert().success();
+
+    telos()
+        .args(["intent", "-s", "Test", "--impact", "test"])
+        .current_dir(dir.path())
+        .assert()
+        .success();
+
+    telos()
+        .args(["constraint", "-s", "Must do X", "--severity", "must", "--impact", "test"])
+        .current_dir(dir.path())
+        .assert()
+        .success();
+
+    telos()
+        .args(["constraint", "-s", "Should do Y", "--severity", "should", "--impact", "test"])
+        .current_dir(dir.path())
+        .assert()
+        .success();
+
+    // --only-must should only include the Must constraint
+    telos()
+        .args(["sync", "--target", "claude", "--only-must"])
+        .current_dir(dir.path())
+        .assert()
+        .success()
+        .stdout(predicates::str::contains("1 constraints"));
+
+    let content = fs::read_to_string(dir.path().join("CLAUDE.md")).unwrap();
+    assert!(content.contains("Must do X"));
+    assert!(!content.contains("Should do Y"));
+}
+
+#[test]
+fn sync_generic_target() {
+    let dir = TempDir::new().unwrap();
+    telos().arg("init").current_dir(dir.path()).assert().success();
+
+    telos()
+        .args(["intent", "-s", "Test", "--impact", "test"])
+        .current_dir(dir.path())
+        .assert()
+        .success();
+
+    telos()
+        .args(["constraint", "-s", "Must do X", "--severity", "must", "--impact", "test"])
+        .current_dir(dir.path())
+        .assert()
+        .success();
+
+    // Default generic target → AGENTS.md
+    telos()
+        .args(["sync", "--target", "generic"])
+        .current_dir(dir.path())
+        .assert()
+        .success();
+
+    assert!(dir.path().join("AGENTS.md").exists());
+    let content = fs::read_to_string(dir.path().join("AGENTS.md")).unwrap();
+    assert!(content.contains("Must do X"));
+    // Generic target should NOT have the per-file query instruction
+    assert!(!content.contains("telos query constraints --file"));
+
+    // Custom output path
+    telos()
+        .args(["sync", "--target", "generic", "--output", "CUSTOM.md"])
+        .current_dir(dir.path())
+        .assert()
+        .success();
+
+    assert!(dir.path().join("CUSTOM.md").exists());
 }

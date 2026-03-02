@@ -207,6 +207,33 @@ enum Commands {
         #[command(subcommand)]
         action: ChangesetAction,
     },
+
+    /// Sync active constraints to agent memory file (CLAUDE.md, etc.)
+    Sync {
+        /// Target: claude, codex, or generic
+        #[arg(long)]
+        target: String,
+
+        /// Output path (only for --target generic)
+        #[arg(long)]
+        output: Option<String>,
+
+        /// Only Must-level constraints
+        #[arg(long, conflicts_with = "all")]
+        only_must: bool,
+
+        /// Include Prefer-level constraints too
+        #[arg(long, conflicts_with = "only_must")]
+        all: bool,
+
+        /// Preview without writing
+        #[arg(long)]
+        dry_run: bool,
+
+        /// Remove managed section
+        #[arg(long)]
+        remove: bool,
+    },
 }
 
 #[derive(Subcommand)]
@@ -398,6 +425,14 @@ fn main() {
                 commands::changeset::for_commit(commit, cli.json)
             }
         },
+        Commands::Sync {
+            target,
+            output,
+            only_must,
+            all,
+            dry_run,
+            remove,
+        } => commands::sync::run(target, output, only_must, all, dry_run, remove),
     };
 
     if let Err(e) = result {
